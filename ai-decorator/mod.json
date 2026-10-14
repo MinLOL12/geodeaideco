@@ -1,0 +1,9 @@
+{
+  "geode": "5.11.1",
+  "gd": {"win": "2.2081"},
+  "id": "minveraz.ai-decorator",
+  "name": "AI Decorator",
+  "version": "v0.1.0",
+  "developer": "Minveraz",
+  "description": "Prompt an AI to decorate selected geometry with a preview and your own API key."
+}
