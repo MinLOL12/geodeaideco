@@ -15,6 +15,7 @@ jobs:
         with:
           sdk: given
           target: Win64
+          path: ai-decorator
           bindings-ref: f8aec5d1f3df76d840dfd2609f02cef30dc6efdf
       - uses: actions/upload-artifact@v4
         with:
