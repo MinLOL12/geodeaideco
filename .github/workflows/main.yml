@@ -1,0 +1,23 @@
+name: Build Windows mod
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: geode-sdk/build-geode-mod@a0f7676e6fcd1a584f6d0c1c800239008412defc
+        id: mod
+        with:
+          sdk: given
+          target: Win64
+          bindings-ref: f8aec5d1f3df76d840dfd2609f02cef30dc6efdf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-decorator-windows
+          path: ${{ steps.mod.outputs.build-output }}/*.geode
+          if-no-files-found: error
