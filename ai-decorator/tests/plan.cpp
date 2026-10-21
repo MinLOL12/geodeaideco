@@ -1,6 +1,6 @@
 // Platform-independent tests for the AI Decorator core (src/Plan.hpp).
 // Build & run:  g++ -std=c++23 -Wall -Wextra -Werror -Ivendor -Isrc tests/plan.cpp -o tests/plan-test && ./tests/plan-test
-#include "Plan.hpp"
+#include "ImageArt.hpp"
 #include <cassert>
 #include <iostream>
 
@@ -250,6 +250,67 @@ int main() {
             "https://example.org/v1/chat/completions\r\nX: y"})
         assert(!validEndpoint(url));
 
-    std::cout << "all plan tests passed\n";
+    // ---- native Claude and Gemini API contracts (without sending a live key) ----
+    {
+        assert(validProviderEndpoint(kClaudeEndpoint));
+        assert(validProviderEndpoint(kGeminiEndpoint));
+        assert(validProviderEndpoint("https://example.org/v1/chat/completions"));
+        assert(!validProviderEndpoint("http://evil.example/v1/messages"));
+        assert(!validProviderEndpoint("https://evil.example/v1beta/models"));
+        assert(providerForEndpoint(kClaudeEndpoint) == Provider::Claude);
+        assert(providerForEndpoint(kGeminiEndpoint) == Provider::Gemini);
+        assert(!validModel(Provider::Gemini, "../../../evil?key=secret"));
+        assert(requestUrl(Provider::Gemini, kGeminiEndpoint, "gemini-2.5-flash") ==
+               "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+
+        auto claude = requestBody(Provider::Claude, "claude-sonnet-4-5", "SYSTEM", "USER", 1.35, false);
+        assert(claude.at("max_tokens") == 4096);
+        assert(claude.at("system") == "SYSTEM");
+        assert(claude.at("temperature") == 1.0);
+        assert(claude.at("messages").size() == 1);
+        assert(claude.at("messages")[0].at("role") == "user");
+        assert(!claude.contains("stream"));
+        auto gemini = requestBody(Provider::Gemini, "gemini-2.5-flash", "SYSTEM", "USER", .85, false);
+        assert(gemini.at("systemInstruction").at("parts")[0].at("text") == "SYSTEM");
+        assert(gemini.at("contents")[0].at("parts")[0].at("text") == "USER");
+        assert(gemini.at("generationConfig").at("responseMimeType") == "application/json");
+        auto repair = requestBody(Provider::Gemini, "gemini-2.5-flash", "SYS", "CTX", .5, true, "bad", "invalid piece");
+        assert(repair.at("contents").size() == 3);
+        assert(repair.at("contents")[1].at("role") == "model");
+        assert(!repair.at("generationConfig").contains("temperature"));
+        auto openai = requestBody(Provider::OpenAICompatible, "x", "SYS", "CTX", .5, false);
+        assert(openai.at("messages")[0].at("role") == "system");
+        assert(openai.at("messages")[1].at("role") == "user");
+
+        assert(providerText(Provider::Claude,
+            R"({"content":[{"type":"thinking","thinking":"ignore"},{"type":"text","text":"{\"objects\":[]}"}]})") == "{\"objects\":[]}");
+        assert(providerText(Provider::Gemini,
+            R"({"candidates":[{"content":{"parts":[{"text":"hello "},{"text":"world"}]}}]})") == "hello world");
+        assert(throwsWith([&] { providerText(Provider::Gemini, R"({"candidates":[]})"); }, "no candidates"));
+    }
+
+    // ---- Gemini image response and bounded image-to-GD-object conversion ----
+    {
+        assert(decodeBase64("AQIDBA==") == (std::vector<unsigned char>{1,2,3,4}));
+        assert(throwsWith([] { decodeBase64("abcd@==="); }, "Invalid"));
+        assert(geminiImage(R"({"candidates":[{"content":{"parts":[{"text":"done"},{"inlineData":{"mimeType":"image/png","data":"AQIDBA=="}}]}}]})") ==
+               (std::vector<unsigned char>{1,2,3,4}));
+        assert(throwsWith([] { geminiImage(R"({"candidates":[{"content":{"parts":[{"text":"no image"}]}}]})"); }, "no PNG/JPEG"));
+        std::vector<unsigned char> pixels(8 * 8 * 4, 255);
+        for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+            auto pos = 4 * (y * 8 + x);
+            pixels[pos] = 0; pixels[pos+1] = 31; pixels[pos+2] = 255; // blue background
+            if (x >= 2 && x < 6 && y >= 2 && y < 6) {
+                pixels[pos] = 100; pixels[pos+1] = 150; pixels[pos+2] = 50;
+            }
+        }
+        auto art = rasterizeArt(pixels.data(), 8, 8, 4, 8);
+        assert(art.width == 8 && art.height == 8);
+        assert(art.rects.size() == 1);
+        assert(art.rects[0].x == 2 && art.rects[0].y == 2 && art.rects[0].w == 4 && art.rects[0].h == 4);
+        assert(throwsWith([&] { rasterizeArt(nullptr, 8, 8, 4); }, "Invalid"));
+    }
+
+    std::cout << "all plan, provider and image-art tests passed\n";
     return 0;
 }

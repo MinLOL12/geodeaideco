@@ -6,7 +6,7 @@
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
-#include "Plan.hpp"
+#include "ImageArt.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -46,6 +46,7 @@ using deco::Json;
 
 namespace {
 std::string sessionKey;
+std::string sessionKeyEndpoint; // A key is only sent to the endpoint it was entered for.
 
 void notice(std::string const& msg) {
     FLAlertLayer::create("AI Decorator", msg, "OK")->show();
@@ -238,6 +239,121 @@ CCLabelBMFont* addLabel(CCNode* parent, std::string const& text, CCPoint pos, fl
 }
 
 // ---------------------------------------------------------------------------
+// Image-art mode: preview the source image beside the *actual* GD-object
+// approximation. Applying inserts editable pixel objects (not a local sprite).
+// ---------------------------------------------------------------------------
+class ArtPreview : public Popup {
+    WeakRef<EditorUI> m_ui;
+    Selection m_src;
+    deco::ArtImage m_art;
+    CCMenuItemSpriteExtra* m_apply = nullptr;
+
+    void onApply(CCObject*) {
+        auto ui = m_ui.lock();
+        if (!ui || !ui->getParent() || LevelEditorLayer::get() != ui->m_editorLayer) {
+            notice("The original editor is no longer open."); return;
+        }
+        auto* pixel = GameObject::createWithKey(917); // the pure-decoration pixel used by image importers
+        if (!pixel || static_cast<int>(pixel->m_objectType) != kTypeDecoration ||
+            !pixel->m_baseColor) {
+            notice("This game version does not provide a safe colorable pixel object. Nothing was added."); return;
+        }
+        std::ostringstream encoded;
+        encoded.imbue(std::locale::classic());
+        for (auto const& r : m_art.rects) {
+            double x = m_src.bounds.x + (r.x + r.w / 2.0) * m_src.bounds.w / m_art.width;
+            double y = m_src.bounds.y + (1.0 - (r.y + r.h / 2.0) / m_art.height) * m_src.bounds.h;
+            encoded << "1,917,2," << deco::fmtNum(x) << ",3," << deco::fmtNum(y)
+                    << ",20," << m_src.layer << ",21,1010,24,3;";
+        }
+        m_apply->setEnabled(false);
+        auto pasted = ui->pasteObjects(encoded.str(), true, false);
+        if (!pasted || pasted->count() != m_art.rects.size()) {
+            m_apply->setEnabled(true);
+            notice("The editor could not paste the complete image. Undo any partial paste."); return;
+        }
+        size_t i = 0;
+        for (auto obj : CCArrayExt<GameObject*>(pasted)) {
+            auto const& rect = m_art.rects[i++];
+            auto [rr, gg, bb] = rect.color;
+            float r = rr / 255.f, g = gg / 255.f, b = bb / 255.f;
+            float hi = std::max({r, g, b}), lo = std::min({r, g, b}), delta = hi - lo;
+            float hue = 0;
+            if (delta > 0) {
+                if (hi == r) hue = 60.f * (g - b) / delta;
+                else if (hi == g) hue = 60.f * ((b - r) / delta + 2.f);
+                else hue = 60.f * ((r - g) / delta + 4.f);
+            }
+            if (hue < 0) hue += 360.f;
+            hue = std::fmod(hue + 180.f, 360.f) - 180.f;
+            if (hue == 0) hue = 1; // GD treats zero specially
+            if (auto color = obj->m_baseColor) {
+                color->m_colorID = 1010; // white, adjusted per object; no level-wide color edits
+                color->m_hsv.h = hue;
+                color->m_hsv.s = hi > 0 ? delta / hi : 0;
+                color->m_hsv.v = hi;
+                color->m_hsv.absoluteSaturation = true;
+                color->m_hsv.absoluteBrightness = true;
+                color->m_usesHSV = true;
+            }
+            // Object 917 is 7.5 units across at scale 1, per pixel importers.
+            obj->updateCustomScaleX(obj->m_pixelScaleX * rect.w *
+                                    float(m_src.bounds.w / m_art.width / 7.5));
+            obj->updateCustomScaleY(obj->m_pixelScaleY * rect.h *
+                                    float(m_src.bounds.h / m_art.height / 7.5));
+            obj->updateMainColor();
+        }
+        ui->updateButtons();
+        ui->updateObjectInfoLabel();
+        Notification::create(fmt::format("Added {} editable image-art objects - Undo removes them", pasted->count()),
+                             NotificationIcon::Success, 3.5f)->show();
+        onClose(nullptr);
+    }
+
+    bool init(EditorUI* ui, Selection src, deco::ArtImage art, CCImage* original) {
+        if (!Popup::init(610, 350)) return false;
+        m_ui = ui; m_src = std::move(src); m_art = std::move(art);
+        setTitle("Image Art Preview");
+        addLabel(m_mainLayer, "AI image (reference)", {157, 303}, .5f);
+        addLabel(m_mainLayer, "GD objects (what Apply adds)", {455, 303}, .5f);
+        auto* bg1 = CCLayerColor::create({10, 14, 24, 255}, 280, 225);
+        auto* bg2 = CCLayerColor::create({10, 14, 24, 255}, 280, 225);
+        bg1->setPosition({12, 65}); bg2->setPosition({318, 65});
+        m_mainLayer->addChild(bg1); m_mainLayer->addChild(bg2);
+        auto* texture = new CCTexture2D;
+        if (!texture->initWithImage(original)) { texture->release(); return false; }
+        auto* sprite = CCSprite::createWithTexture(texture);
+        texture->release();
+        if (!sprite) return false;
+        sprite->setPosition({152, 177});
+        sprite->setScale(std::min(274.f / original->getWidth(), 219.f / original->getHeight()));
+        m_mainLayer->addChild(sprite);
+        auto* draw = CCDrawNode::create();
+        float scale = std::min(274.f / m_art.width, 219.f / m_art.height);
+        float left = 458.f - m_art.width * scale / 2, top = 177.f + m_art.height * scale / 2;
+        for (auto const& rect : m_art.rects) {
+            float x = left + rect.x * scale, y = top - (rect.y + rect.h) * scale;
+            float w = rect.w * scale, h = rect.h * scale;
+            CCPoint verts[] = {{x, y}, {x + w, y}, {x + w, y + h}, {x, y + h}};
+            ccColor4F color{rect.color[0] / 255.f, rect.color[1] / 255.f, rect.color[2] / 255.f, 1.f};
+            draw->drawPolygon(verts, 4, color, 0, color);
+        }
+        m_mainLayer->addChild(draw);
+        addLabel(m_mainLayer, fmt::format("{} GD objects. Pixel-art approximation; not photo-realistic. No gameplay objects.",
+                                        m_art.rects.size()), {305, 52}, .42f);
+        addButton(m_buttonMenu, this, menu_selector(ArtPreview::onClose), "Discard", {110, 25}, .6f);
+        m_apply = addButton(m_buttonMenu, this, menu_selector(ArtPreview::onApply), "Apply GD art", {490, 25}, .6f);
+        return true;
+    }
+public:
+    static ArtPreview* create(EditorUI* ui, Selection src, deco::ArtImage art, CCImage* original) {
+        auto* p = new ArtPreview;
+        if (p->init(ui, std::move(src), std::move(art), original)) { p->autorelease(); return p; }
+        delete p; return nullptr;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Preview popup: draws the actual pieces (shapes per type, real source
 // footprints by kind), with Apply / Regenerate / Back / Discard.
 // ---------------------------------------------------------------------------
@@ -308,23 +424,29 @@ class ApiSetup : public Popup {
         return field;
     }
 
-    void preset(char const* url, char const* hint) {
+    void preset(char const* url, char const* hint, char const* model) {
+        if (m_endpoint->getString() != std::string(url)) m_key->setString("");
         m_endpoint->setString(url);
+        m_model->setString(model);
         m_hint->setString(hint);
     }
-    void onOpenAI(CCObject*) { preset("https://api.openai.com/v1/chat/completions", "Model examples: gpt-4o, gpt-4o-mini  (API billing is separate from ChatGPT)"); }
-    void onOpenRouter(CCObject*) { preset("https://openrouter.ai/api/v1/chat/completions", "Model examples: openai/gpt-4o-mini, anthropic/claude-sonnet-4"); }
-    void onGroq(CCObject*) { preset("https://api.groq.com/openai/v1/chat/completions", "Model examples: llama-3.3-70b-versatile, openai/gpt-oss-120b"); }
-    void onLocal(CCObject*) { preset("http://127.0.0.1:11434/v1/chat/completions", "Ollama on this PC (free, no key needed - type anything). Model: qwen2.5-coder, llama3.1"); }
+    void onOpenAI(CCObject*) { preset(deco::kDefaultEndpoint, "OpenAI API key (not a ChatGPT subscription).", "gpt-4o-mini"); }
+    void onOpenRouter(CCObject*) { preset("https://openrouter.ai/api/v1/chat/completions", "OpenRouter API key and model ID.", "anthropic/claude-sonnet-4"); }
+    void onGroq(CCObject*) { preset("https://api.groq.com/openai/v1/chat/completions", "Groq API key and model ID.", "llama-3.3-70b-versatile"); }
+    void onLocal(CCObject*) { preset("http://127.0.0.1:11434/v1/chat/completions", "Ollama on this PC (free, no key needed).", "qwen2.5-coder"); }
+    void onClaude(CCObject*) { preset(deco::kClaudeEndpoint, "Anthropic Console API key (not a Claude subscription).", "claude-sonnet-4-5"); }
+    void onGemini(CCObject*) { preset(deco::kGeminiEndpoint, "Google AI Studio API key (not a Gemini subscription).", "gemini-2.5-flash"); }
 
     void onSave(CCObject*) {
         auto endpoint = m_endpoint->getString();
         auto model = m_model->getString();
         auto key = m_key->getString();
-        if (!deco::validEndpoint(endpoint)) { notice("Use a full endpoint ending in /chat/completions (HTTPS, or http://127.0.0.1 for a local model)."); return; }
-        if (model.empty()) { notice("Enter a model ID your account / local server provides."); return; }
+        if (!deco::validProviderEndpoint(endpoint)) { notice("Use a provider preset, or an HTTPS /chat/completions endpoint (local HTTP is allowed)."); return; }
+        if (!deco::validModel(deco::providerForEndpoint(endpoint), model)) { notice("Enter a valid model ID (Gemini IDs use letters, digits, dots, hyphens or underscores)."); return; }
         if (key.find_first_of("\r\n") != std::string::npos) { notice("The API key contains invalid characters."); return; }
-        if (!key.empty()) sessionKey = key;
+        // Never reuse an OpenAI/Claude/etc. key for a different endpoint.
+        if (!key.empty()) { sessionKey = key; sessionKeyEndpoint = endpoint; }
+        else if (endpoint != sessionKeyEndpoint) { sessionKey.clear(); sessionKeyEndpoint.clear(); }
         Mod::get()->setSavedValue("endpoint", endpoint);
         Mod::get()->setSavedValue("model", model);
         onClose(nullptr);
@@ -332,6 +454,7 @@ class ApiSetup : public Popup {
 
     void onClearKey(CCObject*) {
         sessionKey.clear();
+        sessionKeyEndpoint.clear();
         m_key->setString("");
         Notification::create("Session API key cleared", NotificationIcon::Info)->show();
     }
@@ -343,25 +466,28 @@ class ApiSetup : public Popup {
     }
 
     bool init(std::function<void()> onDone) {
-        if (!Popup::init(460, 305)) return false;
+        if (!Popup::init(460, 350)) return false;
         m_onDone = std::move(onDone);
         setTitle("API Setup");
-        m_key = input("API key (kept in memory for this game session only)", "Paste API key", 250, 512);
+        auto savedEndpoint = Mod::get()->getSavedValue<std::string>("endpoint", deco::kDefaultEndpoint);
+        m_key = input("API key (kept in memory for this game session only)", "Paste API key", 292, 512);
         m_key->setPasswordMode(true);
-        m_key->setString(sessionKey);
-        m_endpoint = input("Chat Completions endpoint", "https://provider/v1/chat/completions", 204, 500);
-        m_endpoint->setString(Mod::get()->getSavedValue<std::string>("endpoint", "https://api.openai.com/v1/chat/completions"));
-        m_model = input("Model ID", "Your provider's model ID", 158, 160);
+        m_key->setString(savedEndpoint == sessionKeyEndpoint ? sessionKey : "");
+        m_endpoint = input("Provider endpoint", "Select a provider below", 246, 500);
+        m_endpoint->setString(savedEndpoint);
+        m_model = input("Model ID", "Your provider's model ID", 200, 160);
         m_model->setString(Mod::get()->getSavedValue<std::string>("model", ""));
 
-        addLabel(m_mainLayer, "Presets:", {32, 126}, .5f, "bigFont.fnt", 0.f);
-        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onOpenAI), "OpenAI", {118, 122}, .45f);
-        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onOpenRouter), "OpenRouter", {205, 122}, .45f);
-        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onGroq), "Groq", {285, 122}, .45f);
-        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onLocal), "Ollama (local)", {378, 122}, .45f);
-        m_hint = addLabel(m_mainLayer, "Pick a preset or paste any OpenAI-compatible endpoint.", {230, 96}, .42f);
-        addLabel(m_mainLayer, "Sends only: your prompt + selected objects' types/positions/sizes.", {230, 76}, .42f);
-        addLabel(m_mainLayer, "No key is written to disk. Requests go only to the endpoint above.", {230, 60}, .42f);
+        addLabel(m_mainLayer, "Presets:", {32, 162}, .5f, "bigFont.fnt", 0.f);
+        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onOpenAI), "OpenAI", {125, 159}, .43f);
+        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onClaude), "Claude", {225, 159}, .43f);
+        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onGemini), "Gemini", {335, 159}, .43f);
+        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onOpenRouter), "OpenRouter", {125, 131}, .43f);
+        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onGroq), "Groq", {225, 131}, .43f);
+        addButton(m_buttonMenu, this, menu_selector(ApiSetup::onLocal), "Ollama", {335, 131}, .43f);
+        m_hint = addLabel(m_mainLayer, "Choose a provider; native Claude/Gemini keys work directly.", {230, 103}, .42f);
+        addLabel(m_mainLayer, "Sends only: your prompt + selected objects' types/positions/sizes.", {230, 79}, .42f);
+        addLabel(m_mainLayer, "No key is written to disk. Requests go only to the endpoint above.", {230, 63}, .42f);
 
         addButton(m_buttonMenu, this, menu_selector(ApiSetup::onSave), "Save", {320, 30}, .7f);
         addButton(m_buttonMenu, this, menu_selector(ApiSetup::onClearKey), "Clear key", {140, 30}, .55f);
@@ -397,6 +523,7 @@ class Decorator : public Popup {
     CCLabelBMFont* m_status = nullptr;
     LoadingSpinner* m_spinner = nullptr;
     CCMenuItemSpriteExtra* m_generate = nullptr;
+    CCMenuItemSpriteExtra* m_generateImage = nullptr;
     ButtonSprite* m_creativitySpr = nullptr;
     ButtonSprite* m_densitySpr = nullptr;
     ButtonSprite* m_layerSpr = nullptr;
@@ -416,10 +543,9 @@ class Decorator : public Popup {
 
     void refreshConnLabel() {
         auto model = Mod::get()->getSavedValue<std::string>("model", "");
-        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", "https://api.openai.com/v1/chat/completions");
+        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", deco::kDefaultEndpoint);
         std::string text;
-        if (sessionKey.empty() && endpointHost(endpoint).find("127.0.0.1") == std::string::npos &&
-            endpointHost(endpoint).find("localhost") == std::string::npos)
+        if ((sessionKey.empty() || sessionKeyEndpoint != endpoint) && endpoint.rfind("http://", 0) != 0)
             text = "No API key set - tap API Setup";
         else if (model.empty())
             text = "No model set - tap API Setup";
@@ -431,6 +557,7 @@ class Decorator : public Popup {
     void setBusy(bool busy, std::string const& status) {
         m_busy = busy;
         m_generate->setEnabled(!busy);
+        m_generateImage->setEnabled(!busy);
         m_prompt->setEnabled(!busy);
         m_spinner->setVisible(busy);
         m_status->setString(status.c_str());
@@ -479,9 +606,9 @@ class Decorator : public Popup {
         notice(
             "1) Select a section of your level (max 400 objects).\n"
             "2) Set editor colors: channel 1 = primary, 2 = accent, 3 = highlight.\n"
-            "3) API Setup: your key (session only), endpoint and model. Local Ollama works too.\n"
-            "4) Describe the look, pick creativity/amount/layer, then Generate.\n"
-            "5) In the preview: Apply, Regenerate for a different variation, or Back to edit.\n\n"
+            "3) API Setup: choose OpenAI, Claude, Gemini, or a local model; enter its key.\n"
+            "4) GD Pieces asks a text model for a native decoration plan.\n"
+            "5) Image Art (Gemini image model) generates a picture and previews its pixel-art GD-object conversion before Apply.\n\n"
             "Only true decoration objects (no hitboxes/triggers) can be generated, "
             "verified against the game at runtime. Nothing is placed until you press Apply; editor Undo removes it all.");
     }
@@ -502,16 +629,17 @@ class Decorator : public Popup {
     void onGenerate(CCObject*) {
         if (m_busy) return;
         if (m_prompt->getString().empty()) { notice("Describe the decoration first (or tap a style preset)."); return; }
-        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", "https://api.openai.com/v1/chat/completions");
+        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", deco::kDefaultEndpoint);
         auto model = Mod::get()->getSavedValue<std::string>("model", "");
-        bool local = endpointHost(endpoint).find("127.0.0.1") != std::string::npos ||
-                     endpointHost(endpoint).find("localhost") != std::string::npos;
-        if (model.empty() || (sessionKey.empty() && !local)) {
-            notice("Set your API key, endpoint and model first.");
+        if (!deco::validProviderEndpoint(endpoint) || !deco::validModel(deco::providerForEndpoint(endpoint), model)) {
+            notice("The saved provider endpoint or model ID is invalid. Open API Setup to fix it."); return;
+        }
+        bool local = endpoint.rfind("http://", 0) == 0;
+        if ((sessionKey.empty() || sessionKeyEndpoint != endpoint) && !local) {
+            notice("Set the API key for this provider in API Setup first.");
             onSetup(nullptr);
             return;
         }
-        if (!deco::validEndpoint(endpoint)) { notice("The saved endpoint is not a valid /chat/completions URL. Open API Setup to fix it."); return; }
         Mod::get()->setSavedValue("prompt", std::string(m_prompt->getString()));
         Mod::get()->setSavedValue("creativity", m_creativity);
         Mod::get()->setSavedValue("density", m_density);
@@ -520,25 +648,101 @@ class Decorator : public Popup {
         sendRequest(RequestCtx{currentOptions(false), 0, false, "", ""});
     }
 
+    // Gemini image-generation is a separate API capability. Claude's Messages
+    // API accepts image input but cannot generate image output.
+    void onGenerateImage(CCObject*) {
+        if (m_busy) return;
+        if (m_prompt->getString().empty()) { notice("Describe the artwork first."); return; }
+        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", deco::kDefaultEndpoint);
+        if (deco::providerForEndpoint(endpoint) != deco::Provider::Gemini ||
+            !deco::validProviderEndpoint(endpoint)) {
+            notice("Image Art requires a Gemini API key. Choose the Gemini preset in API Setup. Claude can make native decoration plans, but cannot generate images.");
+            return;
+        }
+        if (sessionKey.empty() || sessionKeyEndpoint != endpoint) {
+            notice("Enter your Gemini API key in API Setup first."); onSetup(nullptr); return;
+        }
+        auto savedModel = Mod::get()->getSavedValue<std::string>("model", "");
+        auto imageModel = savedModel.find("image") != std::string::npos ? savedModel : "gemini-2.5-flash-image";
+        if (!deco::validModel(deco::Provider::Gemini, imageModel)) {
+            notice("Invalid Gemini image model ID in API Setup."); return;
+        }
+        auto opt = currentOptions(false);
+        auto context = deco::buildContext(m_src.objects, m_src.bounds, opt);
+        auto imagePrompt = fmt::format(
+            "Create one detailed 2D game art illustration for a Geometry Dash structure. Style request: {}. "
+            "Draw a coherent designed material surface with lighting, natural textures and fine details, "
+            "not repeated neon squares or abstract glowing circles. Use the selection layout below to "
+            "inform the silhouette. Keep gameplay hazards and orbs unobscured. Render only the object "
+            "art, centered and filling most of the frame, on a flat vivid cobalt-blue (#001fff) "
+            "background for chroma keying; no text, no UI, no border. Layout: {}",
+            opt.prompt, truncate(context.dump(), 7500));
+        Json payload = {
+            {"contents", Json::array({{{"role", "user"}, {"parts", Json::array({{{"text", imagePrompt}}})}}})},
+            {"generationConfig", {{"responseModalities", Json::array({"TEXT", "IMAGE"})}}}
+        };
+        auto body = matjson::parse(payload.dump());
+        if (!body) { notice("Could not encode the image request."); return; }
+        Mod::get()->setSavedValue("prompt", std::string(m_prompt->getString()));
+        setBusy(true, fmt::format("Generating image with {}...", imageModel));
+        web::WebRequest request;
+        request.header("x-goog-api-key", sessionKey).header("Content-Type", "application/json")
+            .timeout(std::chrono::seconds(120)).followRedirects(false);
+        auto weak = WeakRef(this);
+        m_request.spawn(request.bodyJSON(body.unwrap()).post(
+            deco::requestUrl(deco::Provider::Gemini, endpoint, imageModel)),
+            [weak](web::WebResponse resp) {
+                auto self = weak.lock();
+                if (!self) return;
+                if (!resp.ok()) {
+                    self->setBusy(false, "Image request failed - nothing was added");
+                    auto response = resp.string();
+                    auto message = response ? response.unwrap() : std::string();
+                    for (auto& c : message) if (c == '\n' || c == '\r') c = ' ';
+                    notice(fmt::format("Gemini image request failed (HTTP {}). {}\nCheck image-model access and API billing. No objects were added.",
+                                       resp.code(), truncate(message, 230)));
+                    return;
+                }
+                try {
+                    if (resp.data().size() > 12000000) throw std::runtime_error("Image response exceeded 12 MB.");
+                    auto response = resp.string();
+                    if (!response) throw std::runtime_error("Could not read the image response.");
+                    auto bytes = deco::geminiImage(response.unwrap());
+                    auto* image = new CCImage;
+                    if (!image->initWithImageData(bytes.data(), static_cast<int>(bytes.size()))) {
+                        image->release(); throw std::runtime_error("Could not decode Gemini's PNG/JPEG image.");
+                    }
+                    try {
+                        deco::ArtImage art;
+                        for (int res : {64, 48, 32, 24}) {
+                            art = deco::rasterizeArt(image->getData(), image->getWidth(), image->getHeight(),
+                                                     image->hasAlpha() ? 4 : 3, res);
+                            if (art.rects.size() <= 2000) break;
+                        }
+                        if (art.rects.size() > 2000) throw std::runtime_error("Image is too detailed for safe conversion to GD objects.");
+                        auto ui = self->m_ui.lock();
+                        auto* preview = ui ? ArtPreview::create(ui.data(), self->m_src, std::move(art), image) : nullptr;
+                        image->release();
+                        self->setBusy(false, "Image ready - review both previews before applying");
+                        if (preview) preview->show();
+                        else notice("Could not open the image-art preview.");
+                    } catch (...) { image->release(); throw; }
+                } catch (std::exception const& e) {
+                    self->setBusy(false, "Image generation failed - nothing was added");
+                    notice(fmt::format("Could not convert the generated image: {}\nNo objects were added.", e.what()));
+                }
+            });
+    }
+
     void sendRequest(RequestCtx ctx) {
-        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", "https://api.openai.com/v1/chat/completions");
+        auto endpoint = Mod::get()->getSavedValue<std::string>("endpoint", deco::kDefaultEndpoint);
         auto model = Mod::get()->getSavedValue<std::string>("model", "");
+        auto provider = deco::providerForEndpoint(endpoint);
         auto system = deco::buildSystemPrompt(m_vocab, ctx.opt);
         auto context = deco::buildContext(m_src.objects, m_src.bounds, ctx.opt);
-
-        Json messages = Json::array({
-            {{"role", "system"}, {"content", system}},
-            {{"role", "user"}, {"content", context.dump()}},
-        });
-        if (ctx.phase == 1) {
-            messages.push_back({{"role", "assistant"}, {"content", ctx.prevText}});
-            messages.push_back({{"role", "user"},
-                {"content", "That output was invalid: " + ctx.feedback +
-                            " Return ONLY the corrected JSON object, following every rule and using only the listed object names."}});
-        }
-        Json payload = {{"model", model}, {"stream", false}, {"messages", messages}};
-        if (!ctx.noTemperature) payload["temperature"] = ctx.opt.temperature;
-
+        auto payload = deco::requestBody(provider, model, system, context.dump(), ctx.opt.temperature,
+                                         ctx.noTemperature, ctx.phase == 1 ? ctx.prevText : "",
+                                         ctx.phase == 1 ? ctx.feedback : "");
         auto body = matjson::parse(payload.dump());
         if (!body) { notice("Could not encode the request."); return; }
 
@@ -548,11 +752,19 @@ class Decorator : public Popup {
         setBusy(true, status);
 
         auto weak = WeakRef(this);
-        auto key = sessionKey.empty() ? std::string("local") : sessionKey;
-        m_request.spawn(web::WebRequest().header("Authorization", "Bearer " + key)
-                .header("Content-Type", "application/json").timeout(std::chrono::seconds(120))
-                .followRedirects(false).bodyJSON(body.unwrap()).post(endpoint),
-            [weak, ctx](web::WebResponse resp) mutable {
+        auto key = sessionKeyEndpoint == endpoint ? sessionKey : std::string();
+        web::WebRequest request;
+        request.header("Content-Type", "application/json")
+            .timeout(std::chrono::seconds(120)).followRedirects(false);
+        if (provider == deco::Provider::Claude) {
+            request.header("x-api-key", key).header("anthropic-version", "2023-06-01");
+        } else if (provider == deco::Provider::Gemini) {
+            request.header("x-goog-api-key", key);
+        } else {
+            request.header("Authorization", "Bearer " + (key.empty() ? "local" : key));
+        }
+        m_request.spawn(request.bodyJSON(body.unwrap()).post(deco::requestUrl(provider, endpoint, model)),
+            [weak, ctx, provider](web::WebResponse resp) mutable {
                 auto self = weak.lock();
                 if (!self) return;
                 if (!resp.ok()) {
@@ -579,7 +791,7 @@ class Decorator : public Popup {
                 try {
                     auto text = resp.string();
                     if (!text) throw std::runtime_error("Could not read the API response.");
-                    auto content = deco::extractAssistantText(text.unwrap());
+                    auto content = deco::providerText(provider, text.unwrap());
                     auto plan = deco::parsePlan(content, self->m_src.objects, self->m_src.bounds, self->m_vocab);
 
                     // The v1 complaint, handled: if a regenerate comes back as
@@ -598,7 +810,7 @@ class Decorator : public Popup {
                         std::string bad;
                         try {
                             auto text = resp.string();
-                            if (text) bad = truncate(deco::extractAssistantText(text.unwrap()), 6000);
+                            if (text) bad = truncate(deco::providerText(provider, text.unwrap()), 6000);
                         } catch (...) {}
                         auto next = RequestCtx{ctx.opt, 1, ctx.noTemperature, e.what(), std::move(bad)};
                         self->sendRequest(std::move(next));
@@ -668,8 +880,9 @@ class Decorator : public Popup {
         m_mainLayer->addChild(m_spinner);
         m_status = addLabel(m_mainLayer, "Sends your prompt + selection info to your chosen endpoint", {250, 64}, .44f);
 
-        addButton(m_buttonMenu, this, menu_selector(Decorator::onHelp), "Help", {70, 30}, .55f);
-        m_generate = addButton(m_buttonMenu, this, menu_selector(Decorator::onGenerate), "Generate", {392, 30}, .8f);
+        addButton(m_buttonMenu, this, menu_selector(Decorator::onHelp), "Help", {65, 30}, .55f);
+        m_generateImage = addButton(m_buttonMenu, this, menu_selector(Decorator::onGenerateImage), "Image Art", {222, 30}, .65f);
+        m_generate = addButton(m_buttonMenu, this, menu_selector(Decorator::onGenerate), "GD Pieces", {403, 30}, .7f);
         return true;
     }
 public:
