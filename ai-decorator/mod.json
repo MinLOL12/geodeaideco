@@ -3,7 +3,7 @@
   "gd": {"win": "2.2081"},
   "id": "minveraz.ai-decorator",
   "name": "AI Decorator",
-  "version": "v0.2.0",
+  "version": "v0.1.0",
   "developer": "Minveraz",
-  "description": "Prompt an AI to decorate your selected structures with real decoration objects. Verified decoration-only pieces, anchored placement, variations with Regenerate, and a live preview. Bring your own API key or a local model."
+  "description": "Prompt an AI to decorate selected geometry with a preview and your own API key."
 }
