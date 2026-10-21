@@ -10,10 +10,16 @@ add_library(${PROJECT_NAME} SHARED src/main.cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE vendor)
 setup_geode_mod(${PROJECT_NAME})
 
-# TEMP CI diagnostic (revert after use): surface compiler errors as
-# workflow annotations so they are readable without log download.
+# TEMP CI diagnostic (revert after use): replay the real compile command
+# for src/main.cpp and surface its errors as workflow annotations.
 if(DEFINED ENV{GITHUB_STEP_SUMMARY})
-    file(APPEND "$ENV{GITHUB_STEP_SUMMARY}" "DIAG-CMAKE-REACHED\n")
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-        CXX_COMPILER_LAUNCHER "cmd;/c;${CMAKE_CURRENT_SOURCE_DIR}/tools/diag-wrap.bat")
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "" FORCE)
+    add_custom_target(diagcheck ALL
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/tools/diag-check.ps1
+            -BuildDir ${CMAKE_BINARY_DIR}
+        COMMENT "diagcheck"
+        VERBATIM)
+    add_dependencies(diagcheck GeodeBindings)
+    add_dependencies(${PROJECT_NAME} diagcheck)
 endif()
