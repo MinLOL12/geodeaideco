@@ -90,6 +90,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGEODE_TARGET_PLATFORM=
 cmake --build build
 ```
 
+The build compiles Codegen from the selected bindings checkout rather than downloading the latest Codegen release. The released binary may generate `Geode/mapping/*` includes that do not exist in an older pinned bindings checkout. This makes the first configure slower but keeps generated headers compatible with the bindings sources.
+
 ## Core tests
 
 The platform-independent core (prompt building, grid map, parsing/validation, anchoring, dedupe, plan similarity, serialization, endpoint rules) is covered by unit tests that need only a C++ compiler:

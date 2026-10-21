@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT DEFINED ENV{GEODE_SDK})
     message(FATAL_ERROR "Set GEODE_SDK to your Geode SDK directory")
 endif()
+# The downloaded Codegen binary tracks the latest bindings, not the checked-out
+# bindings revision. It can emit headers (e.g. Geode/mapping/*) absent from an
+# older pinned revision. Build Codegen from that revision instead.
+set(SKIP_BUILDING_CODEGEN OFF)
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 add_library(${PROJECT_NAME} SHARED src/main.cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE vendor)
